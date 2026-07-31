@@ -1,0 +1,13 @@
+{
+  "_comment": "Your subscription spend. I seeded the SERVICES I could verify you use — but every amount is null because I cannot read your billing. Fill in 'cost' (the amount you pay), 'cycle' (monthly|yearly), and 'renews' (next charge date YYYY-MM-DD). The dashboard then draws the graphs and the upcoming-charges timeline. Copy this file to expenses.json.",
+  "currency": "GBP",
+  "services": [
+    { "name": "Claude (Anthropic)", "plan": null, "cost": null, "cycle": "monthly", "renews": null, "note": "claude.ai → Settings → Billing for plan + renewal date" },
+    { "name": "Bolt.new", "plan": "Pro", "cost": null, "cycle": "monthly", "renews": null },
+    { "name": "Netlify", "plan": null, "cost": null, "cycle": "monthly", "renews": null },
+    { "name": "Supabase", "plan": null, "cost": null, "cycle": "monthly", "renews": null },
+    { "name": "Vercel", "plan": null, "cost": null, "cycle": "monthly", "renews": null },
+    { "name": "Resend", "plan": null, "cost": null, "cycle": "monthly", "renews": null },
+    { "name": "GitHub", "plan": null, "cost": null, "cycle": "monthly", "renews": null }
+  ]
+}

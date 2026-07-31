@@ -1,0 +1,6 @@
+{
+  "_comment": "UNVERIFIED until you fill them in. The platform APIs do not expose plan/cost at standard tiers, and this tool does not guess. Put YOUR real plan + cost here (from each billing page) and they'll show; leave null and the dashboard shows '—' rather than a made-up value.",
+  "netlify":  { "plan": null, "monthlyCost": null, "currency": "GBP", "bandwidthLimitGB": null },
+  "supabase": { "plan": null, "monthlyCost": null, "currency": "GBP" },
+  "resend":   { "plan": null, "monthlyCost": null, "currency": "GBP", "monthlySendLimit": null, "sentThisMonth": null }
+}

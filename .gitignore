@@ -1,0 +1,8 @@
+.env
+config.json
+dashboard.html
+GATE-PASSPHRASE.txt
+dist/
+expenses.json
+refresh.log
+.netlify-site
