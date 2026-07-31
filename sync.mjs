@@ -277,13 +277,30 @@ async function seoAudit(urls) {
 // Est. cost = Anthropic API list price. cacheWrite=1.25x input, cacheRead=0.1x input.
 const CLAUDE_PRICE = { opus: { in: 15, out: 75, cw: 18.75, cr: 1.5 }, sonnet: { in: 3, out: 15, cw: 3.75, cr: 0.3 }, haiku: { in: 1, out: 5, cw: 1.25, cr: 0.1 } };
 const cTier = (m = "") => (/opus/.test(m) ? "opus" : /sonnet/.test(m) ? "sonnet" : /haiku/.test(m) ? "haiku" : "opus");
+function projName(p) {
+  const i = p.lastIndexOf("ClaudeCodes");
+  let tail = i >= 0 ? p.slice(i + 11).replace(/^-+/, "") : p;
+  if (!tail) return "General (mixed)";
+  const flat = tail.replace(/-/g, "").toLowerCase();
+  for (const k of ["BSHNewsletter", "FutureReadyTest", "curious-prospector", "Cimadam", "pilates-finder"])
+    if (flat.includes(k.replace(/-/g, "").toLowerCase())) return k;
+  if (/quiz/.test(flat)) return "Brief Quiz";
+  if (/leadmagnet|factory|dashboard|plugins/.test(flat)) return "Ops Dashboard";
+  if (/promptschat|promptchat/.test(flat)) return "prompts.chat";
+  return tail.split("-").filter(Boolean).slice(0, 2).join(" ");
+}
+
 async function claudeUsage() {
   const root = join(homedir(), ".claude", "projects");
   if (!existsSync(root)) return { available: false };
+  const NOW = Date.now();
   const files = [];
-  for (const p of readdirSync(root)) { try { for (const f of readdirSync(join(root, p))) if (f.endsWith(".jsonl")) files.push(join(root, p, f)); } catch {} }
-  const byTier = {}, byMonth = {}; let msgs = 0, cost = 0, minMo = "9999", maxMo = "0000";
-  for (const file of files) {
+  for (const p of readdirSync(root)) { try { for (const f of readdirSync(join(root, p))) if (f.endsWith(".jsonl")) files.push({ file: join(root, p, f), proj: p }); } catch {} }
+  const byTier = {}, byMonth = {}, byProject = {};
+  const week = Array.from({ length: 12 }, () => ({ cost: 0, tok: 0 }));
+  const day = Array.from({ length: 7 }, () => ({ cost: 0, tok: 0 }));
+  let msgs = 0, cost = 0, tokens = 0, minMo = "9999", maxMo = "0000";
+  for (const { file, proj } of files) {
     await new Promise((res) => {
       const rl = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
       rl.on("line", (line) => {
@@ -293,23 +310,43 @@ async function claudeUsage() {
         const t = cTier(j?.message?.model);
         const r = byTier[t] ||= { in: 0, out: 0, cw: 0, cr: 0, msgs: 0 };
         const iv = u.input_tokens || 0, ov = u.output_tokens || 0, cwv = u.cache_creation_input_tokens || 0, crv = u.cache_read_input_tokens || 0;
+        const tok = iv + ov + cwv + crv;
         r.in += iv; r.out += ov; r.cw += cwv; r.cr += crv; r.msgs++; msgs++;
         const pr = CLAUDE_PRICE[t];
         const c = (iv * pr.in + ov * pr.out + cwv * pr.cw + crv * pr.cr) / 1e6;
-        cost += c;
-        const mo = (j.timestamp || "").slice(0, 7); if (/^\d{4}-\d{2}$/.test(mo)) { (byMonth[mo] ||= { cost: 0 }).cost += c; if (mo < minMo) minMo = mo; if (mo > maxMo) maxMo = mo; }
+        cost += c; tokens += tok;
+        const P = byProject[proj] ||= { name: projName(proj), cost: 0, tok: 0, msgs: 0, last: "" };
+        P.cost += c; P.tok += tok; P.msgs++; if ((j.timestamp || "") > P.last) P.last = j.timestamp || "";
+        const mo = (j.timestamp || "").slice(0, 7); if (/^\d{4}-\d{2}$/.test(mo)) { const m = byMonth[mo] ||= { cost: 0, tok: 0 }; m.cost += c; m.tok += tok; if (mo < minMo) minMo = mo; if (mo > maxMo) maxMo = mo; }
+        const ts = Date.parse(j.timestamp || ""); if (ts) { const da = Math.floor((NOW - ts) / 86400000); const wi = Math.floor(da / 7); if (wi >= 0 && wi < 12) { week[wi].cost += c; week[wi].tok += tok; } if (da >= 0 && da < 7) { day[da].cost += c; day[da].tok += tok; } }
       });
       rl.on("close", res);
     });
   }
-  return { available: true, msgs, cost, byTier, byMonth, minMo, maxMo, sessions: files.length };
+  // merge project folders that map to the same display name
+  const agg = {};
+  for (const p of Object.values(byProject)) { const a = agg[p.name] ||= { name: p.name, cost: 0, tok: 0, msgs: 0, last: "" }; a.cost += p.cost; a.tok += p.tok; a.msgs += p.msgs; if (p.last > a.last) a.last = p.last; }
+  return { available: true, msgs, cost, tokens, byTier, byMonth, projects: Object.values(agg).sort((a, b) => b.cost - a.cost), week, day, thisWeek: week[0], minMo, maxMo, sessions: files.length };
+}
+
+// ── Hunter.io account credits ────────────────────────────────────────
+async function hunter() {
+  const key = env.HUNTER_API_KEY; if (!key) return { connected: false };
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const res = await fetch(`https://api.hunter.io/v2/account?api_key=${key}`, { signal: ctl.signal });
+    if (!res.ok) return { connected: false, error: `HTTP ${res.status}` };
+    const j = (await res.json()).data || {};
+    return { connected: true, plan: j.plan_name, reset: j.reset_date, searches: j.requests?.searches, verifications: j.requests?.verifications };
+  } catch (e) { return { connected: false, error: e.name === "AbortError" ? "timeout" : e.message }; }
+  finally { clearTimeout(t); }
 }
 
 // ── run ──────────────────────────────────────────────────────────────
 const scan = scanApps();
 await pingSupabase(scan.apps);
 const claude = await claudeUsage();
-const [nf, sb, rs] = await Promise.all([netlify(), supabaseLive(), resendLive()]);
+const [nf, sb, rs, hunt] = await Promise.all([netlify(), supabaseLive(), resendLive(), hunter()]);
 // SEO targets: live Netlify sites (prefer custom domains) + any extras in config
 const seo = await seoAudit([
   ...(nf.sites || []).map((s) => s.url).filter(Boolean),
@@ -323,7 +360,7 @@ const tag = (r) => (r.connected ? "live" : r.error || "no token");
 console.log("Platforms: netlify", tag(nf), "| supabase", tag(sb), "| resend", tag(rs));
 
 if (claude.available) console.log(`Claude usage: ${claude.msgs.toLocaleString()} msgs · est. $${claude.cost.toFixed(0)} API-equivalent (${claude.minMo}→${claude.maxMo})`);
-writeFileSync(join(DIR, "dashboard.html"), renderHTML({ scan, nf, sb, rs, cfg, expenses, claude, seo, now }));
+writeFileSync(join(DIR, "dashboard.html"), renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now }));
 console.log("→ wrote dashboard.html");
 
 // =====================================================================
@@ -479,7 +516,102 @@ function renderSEO(seo) {
   <div class="note info" style="margin-top:12px"><span class="ic">i</span><span><b>SEM (paid ads)</b> — Google Ads / Meta Ads spend &amp; performance need those ad-account connectors, which aren't linked here. Add campaign spend to <code>expenses.json</code> to track cost, or connect the ad platforms later for live metrics.</span></div>`;
 }
 
-function renderHTML({ scan, nf, sb, rs, cfg, expenses, claude, seo, now }) {
+// ── token usage over time: this week + weekly + all-time ─────────────
+function renderUsage(claude) {
+  if (!claude?.available) return "";
+  const T = (n) => (n / 1e9 >= 1 ? (n / 1e9).toFixed(2) + "B" : (n / 1e6).toFixed(0) + "M");
+  const usd0 = (n) => "$" + Math.round(n).toLocaleString("en-US");
+  // weekly: index 0 = this week … reverse to oldest→newest, drop empty tail
+  const weeks = claude.week.map((w, i) => ({ i, ...w })).filter((w) => w.tok > 0).reverse();
+  const maxW = Math.max(1, ...weeks.map((w) => w.tok));
+  const weekBars = weeks.map((w) => {
+    const label = w.i === 0 ? "now" : w.i + "w";
+    return `<div class="ubar" title="${T(w.tok)} tok · ${usd0(w.cost)}">
+      <div class="ucol"><div class="ufill" style="height:${Math.max(3, (w.tok / maxW) * 100).toFixed(1)}%"></div></div>
+      <div class="ulab">${label}</div></div>`;
+  }).join("");
+  const months = Object.keys(claude.byMonth).sort();
+  const maxM = Math.max(1, ...months.map((m) => claude.byMonth[m].tok));
+  const monthBars = months.map((m) => {
+    const mm = claude.byMonth[m]; const lab = new Date(m + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short" });
+    return `<div class="ubar" title="${T(mm.tok)} tok · ${usd0(mm.cost)}">
+      <div class="ucol"><div class="ufill alt" style="height:${Math.max(3, (mm.tok / maxM) * 100).toFixed(1)}%"></div></div>
+      <div class="ulab">${lab}</div></div>`;
+  }).join("");
+  return `
+  <div class="section-label"><h2>Token usage over time</h2><div class="rule"></div>
+    <span class="count">list-price value in tooltips</span></div>
+  <div class="spend">
+    <div class="panel">
+      <div class="spend-head">
+        <div><div class="k-label">This week</div><div class="big">${T(claude.thisWeek.tok)}<span style="font-size:14px;color:var(--muted)"> tok</span></div></div>
+        <div><div class="k-label">All time</div><div class="big">${T(claude.tokens)}</div></div>
+        <div class="spend-note">${claude.msgs.toLocaleString()} messages across ${claude.sessions} sessions</div>
+      </div>
+      <div class="k-label" style="margin-bottom:6px">Weekly (last 12 weeks)</div>
+      <div class="uchart">${weekBars || '<span class="pc-line dim">no recent activity</span>'}</div>
+    </div>
+    <div class="panel">
+      <div class="k-label" style="margin-bottom:6px">Monthly (whole time)</div>
+      <div class="uchart">${monthBars}</div>
+    </div>
+  </div>`;
+}
+
+// ── per-app token usage (from Claude Code project logs) ──────────────
+function renderAppUsage(claude) {
+  if (!claude?.available || !claude.projects?.length) return "";
+  const T = (n) => (n / 1e9 >= 1 ? (n / 1e9).toFixed(2) + "B" : (n / 1e6).toFixed(0) + "M");
+  const usd0 = (n) => "$" + Math.round(n).toLocaleString("en-US");
+  const max = Math.max(1, ...claude.projects.map((p) => p.cost));
+  const rows = claude.projects.map((p) => `
+    <div class="xrow">
+      <div class="xname">${esc(p.name)} <span>${p.msgs.toLocaleString()} msgs</span></div>
+      <div class="xbar"><div class="xfill" style="width:${((p.cost / max) * 100).toFixed(1)}%"></div></div>
+      <div class="xval">${T(p.tok)}<span class="dim"> · ${usd0(p.cost)}</span></div>
+    </div>`).join("");
+  return `
+  <div class="section-label"><h2>Usage by app</h2><div class="rule"></div>
+    <span class="count">from our build sessions</span></div>
+  <div class="panel"><div class="xchart">${rows}</div>
+    <div class="pc-line dim" style="margin-top:10px">Tokens &amp; list-price value of Claude Code work per project. "General (mixed)" = sessions run from a parent folder spanning several apps.</div>
+  </div>`;
+}
+
+// ── external tool credits (Hunter, Resend, + keys present) ───────────
+function renderTools(hunt, rs, expenses) {
+  const bar2 = (used, avail) => { const p = avail ? Math.min(100, (used / avail) * 100) : 0; const t = p >= 90 ? "crit" : p >= 75 ? "warn" : "good"; return `<div class="bar ${t}"><span style="width:${p.toFixed(1)}%"></span></div>`; };
+  const num = (n) => (n == null ? "—" : Number(n).toLocaleString());
+  const hunterCard = hunt?.connected ? `
+    <div class="pcard">
+      <div class="pc-head"><div class="svc"><div class="glyph" style="background:#ff5a3c">Hu</div><div><div class="p-name">Hunter.io</div><div class="p-kind">Email finder</div></div></div><span class="pill ok">Live</span></div>
+      <div class="pc-body">
+        <div class="pc-plan">${esc(hunt.plan || "")} · resets ${esc(hunt.reset || "")}</div>
+        <div class="m-wide"><div class="m-top"><span>Searches</span><b>${num(hunt.searches?.used)} / ${num(hunt.searches?.available)}</b></div>${bar2(hunt.searches?.used, hunt.searches?.available)}</div>
+        <div class="m-wide" style="margin-top:8px"><div class="m-top"><span>Verifications</span><b>${num(hunt.verifications?.used)} / ${num(hunt.verifications?.available)}</b></div>${bar2(hunt.verifications?.used, hunt.verifications?.available)}</div>
+      </div>
+    </div>` : `
+    <div class="pcard muted"><div class="pc-head"><div class="svc"><div class="glyph" style="background:#ff5a3c">Hu</div><div><div class="p-name">Hunter.io</div><div class="p-kind">Email finder</div></div></div><span class="pill idle">${hunt?.error ? esc(hunt.error) : "No key"}</span></div></div>`;
+  const resendCard = rs?.connected ? `
+    <div class="pcard">
+      <div class="pc-head"><div class="svc"><div class="glyph" style="background:#5b5bd6">Rs</div><div><div class="p-name">Resend</div><div class="p-kind">Email API</div></div></div><span class="pill ok">Live</span></div>
+      <div class="pc-body"><div class="pc-line">${rs.domains?.length ?? 0} domains · ${rs.verified ?? 0} verified</div>
+        ${(rs.domains || []).map((d) => `<div class="pc-line dim">${esc(d.name)} — ${esc(d.status)}</div>`).join("")}</div>
+    </div>` : `
+    <div class="pcard muted"><div class="pc-head"><div class="svc"><div class="glyph" style="background:#5b5bd6">Rs</div><div><div class="p-name">Resend</div><div class="p-kind">Email API</div></div></div><span class="pill idle">${rs?.error ? esc(rs.error) : "No key"}</span></div></div>`;
+  // other keys present but no live usage endpoint
+  const others = [];
+  if (env.OPENAI_API_KEY) others.push("OpenAI");
+  if (env.GEMINI_API_KEY) others.push("Gemini");
+  const otherCard = others.length ? `
+    <div class="pcard muted"><div class="pc-head"><div class="svc"><div class="glyph" style="background:#10a37f">Ai</div><div><div class="p-name">${esc(others.join(" · "))}</div><div class="p-kind">LLM keys</div></div></div><span class="pill idle">key present</span></div>
+      <div class="pc-body"><div class="pc-line dim">No usage API — check each provider's console for spend.</div></div></div>` : "";
+  return `
+  <div class="section-label"><h2>Tools &amp; credits</h2><div class="rule"></div><span class="count">live where the API allows</span></div>
+  <div class="pcards">${hunterCard}${resendCard}${otherCard}</div>`;
+}
+
+function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now }) {
   const c = { netlify: cfg.netlify || {}, supabase: cfg.supabase || {}, resend: cfg.resend || {} };
   const apps = scan.apps;
   const withSb = apps.filter((a) => a.supabase);
@@ -570,6 +702,10 @@ function renderHTML({ scan, nf, sb, rs, cfg, expenses, claude, seo, now }) {
 
   ${renderClaude(claude, expenses.anthropicConsole, expenses.claudeMax)}
 
+  ${renderUsage(claude)}
+
+  ${renderAppUsage(claude)}
+
   ${renderExpenses(expenses, now)}
 
   <div class="section-label"><h2>Apps</h2><div class="rule"></div><span class="count">backend · deploy · GA4 · git</span></div>
@@ -578,6 +714,8 @@ function renderHTML({ scan, nf, sb, rs, cfg, expenses, claude, seo, now }) {
 
   <div class="section-label"><h2>Platforms</h2><div class="rule"></div><span class="count">live status (optional tokens)</span></div>
   <div class="pcards">${platforms}</div>
+
+  ${renderTools(hunt, rs, expenses)}
 
   ${renderSEO(seo)}
 
@@ -671,6 +809,12 @@ span.dim{color:var(--faint);font-size:11px}
 .xfill.empty{background:repeating-linear-gradient(45deg,var(--surface-2),var(--surface-2) 4px,var(--border) 4px,var(--border) 8px)}
 .xval{font-family:var(--mono);font-size:12px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .xval.dim{color:var(--faint);font-weight:400}
+.uchart{display:flex;align-items:flex-end;gap:5px;height:96px;overflow-x:auto;padding-top:4px}
+.ubar{display:flex;flex-direction:column;align-items:center;gap:5px;flex:1;min-width:20px}
+.ucol{width:100%;max-width:26px;height:76px;display:flex;align-items:flex-end}
+.ufill{width:100%;border-radius:4px 4px 0 0;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 55%,transparent));min-height:3px}
+.ufill.alt{background:linear-gradient(180deg,var(--good),color-mix(in srgb,var(--good) 55%,transparent))}
+.ulab{font-family:var(--mono);font-size:9.5px;color:var(--faint);white-space:nowrap}
 .renews{display:flex;flex-direction:column}
 .renew{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
 .renew:last-child{border-bottom:none}
