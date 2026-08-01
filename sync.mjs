@@ -69,12 +69,13 @@ const SERVICE_SIGS = [
   { s: "Plausible", cat: "analytics", src: /plausible\.io/ },
   { s: "PostHog", cat: "analytics", dep: /posthog/, src: /posthog/ },
   { s: "Twilio", cat: "sms", env: /TWILIO/, dep: /twilio/ },
+  { s: "Auth", cat: "auth", env: /GOOGLE_CLIENT_ID|NEXTAUTH|AUTH_SECRET|CLERK/, dep: /next-auth|@auth\/|@clerk/, src: /supabase\.auth\.|signInWith|GoogleProvider|next-auth|GOOGLE_CLIENT_ID/ },
   { s: "Netlify Functions", cat: "backend", file: "netlify/functions" },
   { s: "Cron/Webhook", cat: "webhook", env: /CRON_SECRET|WEBHOOK/ },
 ];
 function detectIntegrations(appDir, envText, depNames) {
   // one bounded scan of source, then test every signature against it
-  const src = scanFiles(appDir, "(supabase\\.co|js\\.stripe\\.com|api\\.resend\\.com|maps\\.googleapis\\.com|api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage|api\\.hunter\\.io|googletagmanager|G-[A-Z0-9]{10}|GTM-[A-Z0-9]{5,}|plausible\\.io|posthog|fbq\\(|connect\\.facebook|brevo|sendinblue|createClient\\(|GOOGLE_MAPS_KEY|sk-ant-|sk-proj-)",
+  const src = scanFiles(appDir, "(supabase\\.co|supabase\\.auth\\.|signInWith|GoogleProvider|next-auth|GOOGLE_CLIENT_ID|js\\.stripe\\.com|api\\.resend\\.com|maps\\.googleapis\\.com|api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage|api\\.hunter\\.io|googletagmanager|G-[A-Z0-9]{10}|GTM-[A-Z0-9]{5,}|plausible\\.io|posthog|fbq\\(|connect\\.facebook|brevo|sendinblue|createClient\\(|GOOGLE_MAPS_KEY|sk-ant-|sk-proj-)",
     { exts: [".js", ".ts", ".tsx", ".jsx", ".html", ".json", ".env", ".example"], cap: 250 }).join(" ");
   const deps = (depNames || []).join(" ");
   const out = [];
@@ -751,20 +752,52 @@ function renderDatabases(apps, sb, nf) {
   </div>`;
 }
 
-function renderProjectCards(apps, type, title, count) {
+function renderProjectCards(apps, type, title, desc, claude, hunt) {
   const list = apps.filter((a) => a.type === type);
   if (!list.length) return "";
-  const cards = list.map((a) => `
+  const T = (n) => (n / 1e9 >= 1 ? (n / 1e9).toFixed(2) + "B" : (n / 1e6).toFixed(0) + "M");
+  const has = (a, name) => (a.integrations || []).some((i) => i.service === name);
+  const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const matchClaude = (a) => {
+    if (!claude?.projects) return null;
+    const t = [norm(a.name), norm(a.label)].filter(Boolean);
+    return claude.projects.find((p) => t.includes(norm(p.name)))
+      || claude.projects.find((p) => t.some((x) => norm(p.name).includes(x) || x.includes(norm(p.name)))) || null;
+  };
+  const cards = list.map((a) => {
+    const cm = matchClaude(a);
+    const items = [
+      { on: true, label: "Claude Code", note: cm ? `${T(cm.tok)} · $${Math.round(cm.cost).toLocaleString()}` : "built with" },
+      { on: a.hasGit && !a.noRemote, label: "Git", note: a.repo ? a.repo.split("/").pop() : (a.noRemote ? "no remote" : "") },
+      { on: a.deploy === "Netlify" || has(a, "Netlify Functions"), label: "Netlify" },
+      { on: a.deploy === "Vercel", label: "Vercel" },
+      { on: has(a, "Supabase"), label: "Supabase" },
+      { on: has(a, "Auth"), label: "Auth" },
+      { on: has(a, "Stripe"), label: "Stripe" },
+      { on: has(a, "Resend"), label: "Resend" },
+      { on: has(a, "Brevo"), label: "Brevo" },
+      { on: has(a, "Hunter"), label: "Hunter", note: has(a, "Hunter") && hunt?.connected ? `${hunt.searches?.used} used` : "" },
+      { on: has(a, "OpenAI"), label: "OpenAI" },
+      { on: has(a, "Anthropic"), label: "Anthropic" },
+      { on: has(a, "Gemini"), label: "Gemini" },
+      { on: has(a, "Google Maps"), label: "Google Maps" },
+      { on: a.analytics?.kind === "ga4", label: "GA4" },
+    ];
+    const rows = items.map((i) => `<div class="chk ${i.on ? "yes" : "no"}"><span class="tick">${i.on ? "✓" : "✗"}</span><span class="chk-l">${esc(i.label)}</span>${i.note ? `<span class="chk-n">${esc(i.note)}</span>` : ""}</div>`).join("");
+    const total = cm ? `~$${Math.round(cm.cost).toLocaleString()}` : "—";
+    return `
     <div class="proj">
       <div class="proj-h">
         <div><div class="proj-name">${esc(a.label)}</div>${a.url ? `<a class="proj-url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url.replace(/^https?:\/\//, ""))}</a>` : `<div class="proj-url dim">${esc(a.repo || "local only")}</div>`}</div>
-        <span class="pill ${a.thirdParty ? "idle" : "ok"}">${a.thirdParty ? "external" : a.deploy || "local"}</span>
+        <span class="pill ${a.thirdParty ? "idle" : "ok"}">${a.thirdParty ? "external" : a.deploy && a.deploy !== "git → ?" ? a.deploy : "local"}</span>
       </div>
       ${a.purpose ? `<div class="proj-purpose">${esc(a.purpose)}</div>` : ""}
-      <div class="proj-ints">${intBadges(a.integrations)}</div>
-    </div>`).join("");
+      <div class="checklist">${rows}</div>
+      <div class="proj-total"><span>rough Claude Code build value</span><b>${total}</b></div>
+    </div>`;
+  }).join("");
   return `
-  ${secHead(title, count || "", `${list.length}`)}
+  ${secHead(title, desc || "", `${list.length}`)}
   <div class="projgrid">${cards}</div>`;
 }
 
@@ -895,9 +928,9 @@ function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now })
 
   ${renderDatabases(apps, sb, nf)}
 
-  ${renderProjectCards(apps, "app", "Apps", "interactive tools + what each connects to")}
+  ${renderProjectCards(apps, "app", "Apps", "Interactive tools. Each card is a checklist of every main tool — ✓ connected, ✗ missing — so gaps stand out.", claude, hunt)}
 
-  ${renderProjectCards(apps, "website", "Websites", "brand / marketing sites")}
+  ${renderProjectCards(apps, "website", "Websites", "Brand / marketing sites, same tool checklist.", claude, hunt)}
 
   ${renderPayments(expenses, now)}
 
@@ -973,6 +1006,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .proj-url:hover{text-decoration:underline}
 .proj-url.dim{color:var(--faint)}
 .proj-purpose{font-size:12.5px;color:var(--muted);line-height:1.5}
+.checklist{display:grid;grid-template-columns:1fr 1fr;gap:3px 16px;padding-top:10px;border-top:1px dashed var(--border)}
+.chk{display:flex;align-items:baseline;gap:7px;font-size:12px;padding:1px 0;min-width:0}
+.chk .tick{font-family:var(--mono);font-weight:700;font-size:11px;flex:none;width:10px}
+.chk.yes{color:var(--text)}.chk.yes .tick{color:var(--good)}
+.chk.no{color:var(--faint)}.chk.no .tick{color:var(--crit);opacity:.5}
+.chk.no .chk-l{text-decoration:line-through;text-decoration-color:var(--border)}
+.chk-n{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proj-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--faint)}
+.proj-total b{font-family:var(--mono);font-size:15px;color:var(--text)}
 .proj-ints{display:flex;flex-wrap:wrap;gap:5px;padding-top:4px;border-top:1px dashed var(--border)}
 .intb{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:6px;white-space:nowrap;color:var(--c,var(--muted));background:color-mix(in srgb,var(--c,var(--faint)) 14%,transparent);border:1px solid color-mix(in srgb,var(--c,var(--faint)) 30%,transparent)}
 .intb.none{color:var(--faint);background:var(--surface-2);border-color:var(--border)}
