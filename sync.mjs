@@ -41,9 +41,53 @@ function loadExpenses() {
   }
   return { currency: "GBP", services: [] };
 }
+function loadMeta() {
+  const p = join(DIR, "apps-meta.json");
+  if (existsSync(p)) { try { return JSON.parse(readFileSync(p, "utf8")).projects || {}; } catch {} }
+  return {};
+}
 const env = loadEnv();
 const cfg = loadConfig();
 const expenses = loadExpenses();
+const meta = loadMeta();
+
+// ── integration signatures: what external services an app connects to ──
+const SERVICE_SIGS = [
+  { s: "Supabase", cat: "database", env: /SUPABASE/, dep: /@supabase/, src: /supabase\.co|createClient\(/ },
+  { s: "Stripe", cat: "payments", env: /STRIPE/, dep: /stripe/, src: /js\.stripe\.com|stripe\(/ },
+  { s: "Resend", cat: "email", env: /RESEND/, dep: /^resend$/, src: /api\.resend\.com/ },
+  { s: "Brevo", cat: "email", env: /BREVO|SENDINBLUE/, dep: /sib-api|getbrevo|brevo/, src: /brevo|sendinblue/ },
+  { s: "SendGrid", cat: "email", env: /SENDGRID/, dep: /sendgrid/ },
+  { s: "Google Maps", cat: "maps", env: /GOOGLE_MAPS|MAPS_API|MAPS_KEY/, dep: /@googlemaps|google-map/, src: /maps\.googleapis\.com|GOOGLE_MAPS_KEY/ },
+  { s: "OpenAI", cat: "ai", env: /OPENAI/, dep: /^openai$/, src: /api\.openai\.com|sk-proj-/ },
+  { s: "Anthropic", cat: "ai", env: /ANTHROPIC/, dep: /@anthropic/, src: /api\.anthropic\.com|sk-ant-/ },
+  { s: "Gemini", cat: "ai", env: /GEMINI|GOOGLE_AI|GENERATIVE/, dep: /generative-ai/, src: /generativelanguage\.googleapis/ },
+  { s: "Hunter", cat: "enrichment", env: /HUNTER/, src: /api\.hunter\.io/ },
+  { s: "GA4", cat: "analytics", env: /VITE_GA|GA_MEASUREMENT/, src: /G-[A-Z0-9]{10}|googletagmanager\.com\/gtag/ },
+  { s: "Meta Pixel", cat: "analytics", src: /fbq\(|connect\.facebook\.net/ },
+  { s: "GTM", cat: "analytics", src: /GTM-[A-Z0-9]{5,}/ },
+  { s: "Plausible", cat: "analytics", src: /plausible\.io/ },
+  { s: "PostHog", cat: "analytics", dep: /posthog/, src: /posthog/ },
+  { s: "Twilio", cat: "sms", env: /TWILIO/, dep: /twilio/ },
+  { s: "Netlify Functions", cat: "backend", file: "netlify/functions" },
+  { s: "Cron/Webhook", cat: "webhook", env: /CRON_SECRET|WEBHOOK/ },
+];
+function detectIntegrations(appDir, envText, depNames) {
+  // one bounded scan of source, then test every signature against it
+  const src = scanFiles(appDir, "(supabase\\.co|js\\.stripe\\.com|api\\.resend\\.com|maps\\.googleapis\\.com|api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage|api\\.hunter\\.io|googletagmanager|G-[A-Z0-9]{10}|GTM-[A-Z0-9]{5,}|plausible\\.io|posthog|fbq\\(|connect\\.facebook|brevo|sendinblue|createClient\\(|GOOGLE_MAPS_KEY|sk-ant-|sk-proj-)",
+    { exts: [".js", ".ts", ".tsx", ".jsx", ".html", ".json", ".env", ".example"], cap: 250 }).join(" ");
+  const deps = (depNames || []).join(" ");
+  const out = [];
+  for (const sig of SERVICE_SIGS) {
+    let hit = false;
+    if (sig.env && sig.env.test(envText)) hit = true;
+    if (!hit && sig.dep && (depNames || []).some((d) => sig.dep.test(d))) hit = true;
+    if (!hit && sig.src && sig.src.test(src)) hit = true;
+    if (!hit && sig.file && existsSync(join(appDir, sig.file))) hit = true;
+    if (hit) out.push({ service: sig.s, category: sig.cat });
+  }
+  return out;
+}
 
 // Where your apps live. Default: the folder two levels above /dashboard's parent
 // (…/ClaudeCodes). Override with APPS_DIR in .env or "appsDir" in config.json.
@@ -154,6 +198,12 @@ function scanApp(name, appDir) {
     noRemote,
     analytics,
     netlifySiteId,
+    integrations: detectIntegrations(appDir, envText, depNames),
+    type: meta[name]?.type || (usesSupabase ? "app" : isStatic ? "website" : "app"),
+    label: meta[name]?.label || name,
+    purpose: meta[name]?.purpose || "",
+    url: meta[name]?.url || "",
+    issues: meta[name]?.issues || [],
   };
 }
 
@@ -611,6 +661,132 @@ function renderTools(hunt, rs, expenses) {
   <div class="pcards">${hunterCard}${resendCard}${otherCard}</div>`;
 }
 
+// ── health signals → traffic lights + action items ──────────────────
+function computeSignals({ nf, sb, seo, apps, expenses }) {
+  const sig = []; const add = (sev, system, msg, action = "") => sig.push({ sev, system, msg, action });
+  add("green", "Dashboard", "HTTPS enforced · encrypted gate");
+  if (nf?.connected) { const down = (nf.sites || []).filter((s) => !(s.state === "ready" || s.state === "current")).length;
+    add(down ? "amber" : "green", "Netlify", down ? `${down} site not ready` : `${nf.sites?.length || 0} sites live`, down ? "Check failing deploys" : "");
+  } else add("amber", "Netlify", "not connected", "Add NETLIFY_TOKEN");
+  const sbApps = apps.filter((a) => a.supabase); const dead = sbApps.filter((a) => a.supabaseAlive === false);
+  add(dead.length ? "red" : "green", "Supabase", dead.length ? `${dead.length} project unreachable` : `${sbApps.length} projects healthy`, dead.length ? "Investigate the dead project" : "");
+  const appType = apps.filter((a) => a.type === "app"); const noGA = appType.filter((a) => a.analytics?.kind !== "ga4");
+  add(noGA.length ? "amber" : "green", "Analytics", noGA.length ? `${noGA.length}/${appType.length} apps without GA4` : "all apps on GA4", noGA.length ? "Add GA4 to " + noGA.map((a) => a.label).join(", ") : "");
+  if (apps.some((a) => a.integrations?.some((i) => i.service === "Google Maps"))) add("amber", "Google Maps", "key may be unrestricted", "Lock the Maps key to *.curiousbrand.co.uk in Google Cloud Console");
+  if (expenses?.anthropicConsole?.autoReload === false) add("amber", "Anthropic API", "auto-reload OFF", "Turn on auto-reload so credits can't hit $0 mid-session");
+  const noRemote = apps.filter((a) => a.noRemote);
+  add(noRemote.length ? "amber" : "green", "Backups", noRemote.length ? `${noRemote.length} app not on GitHub` : "all apps backed up", noRemote.length ? "Push " + noRemote.map((a) => a.label).join(", ") : "");
+  if (seo?.length) { const up = seo.filter((s) => s.up); const avg = Math.round(up.reduce((a, s) => a + s.score.n, 0) / Math.max(1, up.length));
+    add(avg < 7 ? "amber" : "green", "SEO", `avg ${avg}/11 across sites`, avg < 7 ? "Improve titles, meta descriptions, sitemaps" : ""); }
+  const chest = apps.find((a) => (a.integrations || []).filter((i) => i.category === "ai").length >= 2);
+  if (chest) add("amber", "Secrets", `${chest.label} .env holds many live keys`, "It's gitignored — keep it that way; consider rotating if ever shared");
+  // verified per-app issues from the deep audit (apps-meta.json)
+  for (const a of apps) for (const iss of (a.issues || [])) add(iss.sev, a.label, iss.title, iss.action || "");
+  return sig;
+}
+function sevRank(s) { return ({ red: 0, amber: 1, green: 2 })[s] ?? 3; }
+
+function renderLights(sig) {
+  const order = sig.slice().sort((a, b) => sevRank(a.sev) - sevRank(b.sev));
+  const reds = sig.filter((s) => s.sev === "red").length, ambers = sig.filter((s) => s.sev === "amber").length;
+  const head = reds ? `${reds} need attention` : ambers ? `${ambers} to check` : "all systems healthy";
+  return `
+  <div class="section-label"><h2>System health</h2><div class="rule"></div><span class="count">${head}</span></div>
+  <div class="lights">${order.map((s) => `
+    <div class="light ${s.sev}">
+      <div class="lamp"></div>
+      <div><div class="l-sys">${esc(s.system)}</div><div class="l-msg">${esc(s.msg)}</div></div>
+    </div>`).join("")}</div>`;
+}
+
+function renderActions(sig) {
+  const items = sig.filter((s) => s.sev !== "green" && s.action).sort((a, b) => sevRank(a.sev) - sevRank(b.sev));
+  if (!items.length) return `
+  <div class="section-label"><h2>To check &amp; act on</h2><div class="rule"></div></div>
+  <div class="panel"><div class="pc-line">Nothing needs action — all green. 🎉</div></div>`;
+  return `
+  <div class="section-label"><h2>To check &amp; act on</h2><div class="rule"></div><span class="count">${items.length} item${items.length > 1 ? "s" : ""}</span></div>
+  <div class="acts">${items.map((s) => `
+    <div class="act ${s.sev}">
+      <div class="act-dot"></div>
+      <div class="act-body"><div class="act-t">${esc(s.system)} — ${esc(s.msg)}</div><div class="act-a">${esc(s.action)}</div></div>
+    </div>`).join("")}</div>`;
+}
+
+function catColor(c) { return ({ database: "#3ecf8e", payments: "#635bff", email: "#5b5bd6", maps: "#ea4335", ai: "#10a37f", analytics: "#e0a93f", enrichment: "#ff5a3c", backend: "#00c7b7", webhook: "#8a9ba8", sms: "#25d366", other: "#8a9ba8" })[c] || "#8a9ba8"; }
+function intBadges(ints) {
+  if (!ints?.length) return `<span class="intb none">no integrations</span>`;
+  return ints.map((i) => `<span class="intb" style="--c:${catColor(i.category)}">${esc(i.service)}</span>`).join("");
+}
+
+function renderDatabases(apps, sb, nf) {
+  const dbApps = apps.filter((a) => a.supabase && a.supabaseRefs?.length);
+  const rows = dbApps.map((a) => `
+    <div class="dbrow">
+      <div class="db-app"><b>${esc(a.label)}</b><span>${esc(a.supabaseRefs[0])}</span></div>
+      ${a.supabaseAlive === true ? '<span class="pill ok">reachable</span>' : a.supabaseAlive === false ? '<span class="pill crit">unreachable</span>' : '<span class="pill idle">—</span>'}
+    </div>`).join("");
+  const projects = new Set(dbApps.flatMap((a) => a.supabaseRefs)).size;
+  return `
+  <div class="section-label"><h2>Databases &amp; hosting</h2><div class="rule"></div><span class="count">${projects} Supabase · Netlify</span></div>
+  <div class="spend">
+    <div class="panel">
+      <div class="k-label" style="margin-bottom:10px">Supabase projects (live ping)</div>
+      ${rows || '<div class="pc-line dim">none</div>'}
+    </div>
+    <div class="panel">
+      <div class="k-label" style="margin-bottom:10px">Netlify hosting</div>
+      <div class="pc-line">${nf?.connected ? `${nf.sites?.length || 0} sites · ${nf.upCount || 0} live` : "not connected"}</div>
+      <div class="pc-line dim">${nf?.bandwidth ? `${(nf.bandwidth.usedGB || 0).toFixed(1)} GB bandwidth used` : ""}</div>
+      <div class="pc-line dim" style="margin-top:6px">Supabase = your app databases. Each app has its own project.</div>
+    </div>
+  </div>`;
+}
+
+function renderProjectCards(apps, type, title, count) {
+  const list = apps.filter((a) => a.type === type);
+  if (!list.length) return "";
+  const cards = list.map((a) => `
+    <div class="proj">
+      <div class="proj-h">
+        <div><div class="proj-name">${esc(a.label)}</div>${a.url ? `<a class="proj-url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url.replace(/^https?:\/\//, ""))}</a>` : `<div class="proj-url dim">${esc(a.repo || "local only")}</div>`}</div>
+        <span class="pill ${a.thirdParty ? "idle" : "ok"}">${a.thirdParty ? "external" : a.deploy || "local"}</span>
+      </div>
+      ${a.purpose ? `<div class="proj-purpose">${esc(a.purpose)}</div>` : ""}
+      <div class="proj-ints">${intBadges(a.integrations)}</div>
+    </div>`).join("");
+  return `
+  <div class="section-label"><h2>${title}</h2><div class="rule"></div><span class="count">${list.length}${count ? " · " + count : ""}</span></div>
+  <div class="projgrid">${cards}</div>`;
+}
+
+function renderPayments(expenses, now) {
+  const cur = expenses.currency || "USD";
+  const svcs = (expenses.services || []);
+  const money2 = (v) => (numv(v) == null ? "—" : (cur === "GBP" ? "£" : "$") + Number(v).toLocaleString("en-GB", { maximumFractionDigits: 0 }));
+  const rows = svcs.map((s) => {
+    const last = s.lastPaid ? new Date(s.lastPaid + "T00:00:00") : null;
+    const lastStr = last && !isNaN(last) ? last.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+    return `<tr>
+      <td class="pt-name">${esc(s.name)}${s.plan ? ` <span>${esc(s.plan)}</span>` : ""}</td>
+      <td class="pt-cost">${money2(s.cost)}${s.cost != null ? `<small>/${s.cycle === "yearly" ? "yr" : "mo"}</small>` : ""}</td>
+      <td class="pt-date">${lastStr}</td>
+      <td class="pt-next">${s.renews || "—"}</td>
+    </tr>`;
+  }).join("");
+  const monthly = svcs.reduce((a, s) => a + (numv(s.cost) == null ? 0 : (s.cycle === "yearly" ? s.cost / 12 : s.cost)), 0);
+  const anyCost = svcs.some((s) => numv(s.cost) != null);
+  return `
+  <div class="section-label"><h2>Payments</h2><div class="rule"></div><span class="count">${anyCost ? money2(Math.round(monthly)) + "/mo total" : "add costs"}</span></div>
+  <div class="panel" style="overflow-x:auto">
+    <table class="ptable">
+      <thead><tr><th>Tool</th><th>Cost</th><th>Last paid</th><th>Next / resets</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="pc-line dim" style="margin-top:10px">Fill missing costs &amp; last-paid dates in expenses.json. Amounts I can't read from an API stay blank rather than guessed.</div>
+  </div>`;
+}
+
 function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now }) {
   const c = { netlify: cfg.netlify || {}, supabase: cfg.supabase || {}, resend: cfg.resend || {} };
   const apps = scan.apps;
@@ -619,6 +795,15 @@ function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now })
   const netlifyCount = apps.filter((a) => a.deploy === "Netlify").length;
   const vercelCount = apps.filter((a) => a.deploy === "Vercel").length;
   const conflicts = apps.filter((a) => a.supabaseConflict);
+  const signals = computeSignals({ nf, sb, seo, apps, expenses });
+  const appList = apps.filter((a) => a.type === "app");
+  const siteList = apps.filter((a) => a.type === "website");
+  const liveApps = appList.filter((a) => a.url || (a.deploy && a.deploy !== "git → ?")).length;
+  const dbCount = new Set(apps.filter((a) => a.supabase).flatMap((a) => a.supabaseRefs)).size;
+  const monthlySpend = (expenses.services || []).reduce((s, x) => s + (numv(x.cost) == null ? 0 : (x.cycle === "yearly" ? x.cost / 12 : x.cost)), 0);
+  const anySpend = (expenses.services || []).some((x) => numv(x.cost) != null);
+  const curSym = expenses.currency === "GBP" ? "£" : "$";
+  const redCount = signals.filter((s) => s.sev === "red").length;
 
   // ── APP ROWS ──
   const appRows = apps.map((a) => {
@@ -678,27 +863,37 @@ function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now })
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>App Inventory · Lead Magnet Factory</title><style>${CSS()}</style></head>
+<title>Curious Ops</title><style>${CSS()}</style></head>
 <body><div class="wrap">
   <header class="top">
-    <div class="brand"><div class="dot"></div>
-      <div><h1>App Inventory &amp; Infra</h1><div class="sub">${esc(scan.dir.split("/").pop())} · local scan + live status</div></div></div>
-    <div class="snapshot"><div class="live">Scanned</div><div><b>${esc(stamp)}</b></div><div>${apps.length} apps found</div></div>
+    <div class="brand"><div class="dot ${redCount ? "red" : ""}"></div>
+      <div><h1>Curious Ops</h1><div class="sub">apps · databases · websites · spend · health</div></div></div>
+    <div class="snapshot"><div class="live">Live</div><div><b>${esc(stamp)}</b></div><div>${apps.length} projects tracked</div></div>
   </header>
+
+  ${renderLights(signals)}
 
   <div class="section-label"><h2>At a glance</h2><div class="rule"></div></div>
   <div class="kpis">
-    <div class="kpi"><div class="k-label">Apps</div><div class="k-value">${apps.length}</div>
-      <div class="k-meta">${withSb.length} dynamic · ${apps.length - withSb.length} static</div></div>
-    <div class="kpi"><div class="k-label">On Supabase</div><div class="k-value">${withSb.length}<span class="cur"> / ${apps.length}</span></div>
-      <div class="k-meta">${distinctProjects} separate projects</div>
-      <div class="spark">${bar(apps.length ? (withSb.length / apps.length) * 100 : 0)}</div></div>
-    <div class="kpi"><div class="k-label">Deploy targets</div><div class="k-value">${netlifyCount}<span class="cur"> NF</span> ${vercelCount}<span class="cur"> VC</span></div>
-      <div class="k-meta">${apps.length - netlifyCount - vercelCount} with no config</div></div>
-    <div class="kpi"><div class="k-label">${conflicts.length ? "Config issues" : "Est. infra cost"}</div>
-      <div class="k-value ${conflicts.length ? "warnnum" : ""}">${conflicts.length ? conflicts.length : anyCost ? money(monthlyCost) : "—"}</div>
-      <div class="k-meta">${conflicts.length ? "duplicate Supabase URLs" : anyCost ? "connected plans" : "set costs in config.json"}</div></div>
+    <div class="kpi"><div class="k-label">Live apps</div><div class="k-value">${liveApps}<span class="cur"> / ${appList.length}</span></div>
+      <div class="k-meta">interactive tools</div></div>
+    <div class="kpi"><div class="k-label">Databases</div><div class="k-value">${dbCount}</div>
+      <div class="k-meta">Supabase projects</div></div>
+    <div class="kpi"><div class="k-label">Websites</div><div class="k-value">${siteList.length}</div>
+      <div class="k-meta">brand / marketing</div></div>
+    <div class="kpi"><div class="k-label">Monthly spend</div><div class="k-value">${anySpend ? curSym + Math.round(monthlySpend).toLocaleString() : "—"}</div>
+      <div class="k-meta">${anySpend ? "across your tools" : "add costs to expenses.json"}</div></div>
   </div>
+
+  ${renderDatabases(apps, sb, nf)}
+
+  ${renderProjectCards(apps, "app", "Apps", "interactive tools + what each connects to")}
+
+  ${renderProjectCards(apps, "website", "Websites", "brand / marketing sites")}
+
+  ${renderPayments(expenses, now)}
+
+  ${renderActions(signals)}
 
   ${renderClaude(claude, expenses.anthropicConsole, expenses.claudeMax)}
 
@@ -706,20 +901,11 @@ function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now })
 
   ${renderAppUsage(claude)}
 
-  ${renderExpenses(expenses, now)}
-
-  <div class="section-label"><h2>Apps</h2><div class="rule"></div><span class="count">backend · deploy · GA4 · git</span></div>
-  <div class="apps">${appRows || `<div class="pc-line dim" style="padding:16px">No apps found in ${esc(scan.dir)}. Set "appsDir" in config.json.</div>`}</div>
-  ${conflicts.length ? `<div class="note"><span class="ic">⚠</span><span><b>${conflicts.map((a) => esc(a.name)).join(", ")}</b> ${conflicts.length > 1 ? "have" : "has"} more than one Supabase URL in the env — almost certainly a stale value left in from an earlier project. Clean the <code>.env</code> so only the live project remains.</span></div>` : ""}
-
-  <div class="section-label"><h2>Platforms</h2><div class="rule"></div><span class="count">live status (optional tokens)</span></div>
-  <div class="pcards">${platforms}</div>
-
   ${renderTools(hunt, rs, expenses)}
 
   ${renderSEO(seo)}
 
-  <footer><span>Rescan with <code>node sync.mjs</code> · scans <code>${esc(scan.dir)}</code></span><span>${esc(stamp)}</span></footer>
+  <footer><span>Curious Ops · auto-refreshes daily · status.curiousbrand.co.uk</span><span>${esc(stamp)}</span></footer>
 </div></body></html>`;
 }
 
@@ -740,10 +926,56 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .snapshot b{color:var(--text);font-weight:600}
 .snapshot .live{display:inline-flex;align-items:center;gap:6px;color:var(--good);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
 .snapshot .live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good)}
-.section-label{display:flex;align-items:baseline;gap:10px;margin:30px 0 14px}
-.section-label h2{margin:0;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.wrap{max-width:1040px}
+.section-label{display:flex;align-items:baseline;gap:12px;margin:52px 0 18px}
+.section-label h2{margin:0;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
 .section-label .rule{flex:1;height:1px;background:var(--border)}
 .section-label .count{font-family:var(--mono);font-size:12px;color:var(--faint)}
+.brand .dot.red{background:var(--crit);box-shadow:0 0 0 4px var(--crit-soft)}
+/* system health lights */
+.lights{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.light{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:13px 15px;box-shadow:var(--shadow)}
+.light .lamp{width:14px;height:14px;border-radius:50%;flex:none;position:relative}
+.light.green .lamp{background:var(--good);box-shadow:0 0 0 4px var(--good-soft),0 0 10px var(--good)}
+.light.amber .lamp{background:var(--warn);box-shadow:0 0 0 4px var(--warn-soft),0 0 10px var(--warn)}
+.light.red .lamp{background:var(--crit);box-shadow:0 0 0 4px var(--crit-soft),0 0 12px var(--crit);animation:blink 1.4s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){.light.red .lamp{animation:none}}
+.l-sys{font-size:13.5px;font-weight:650;letter-spacing:-.005em}
+.l-msg{font-size:11.5px;color:var(--muted);margin-top:1px}
+/* action items */
+.acts{display:flex;flex-direction:column;gap:10px}
+.act{display:flex;gap:12px;background:var(--surface);border:1px solid var(--border);border-left-width:3px;border-radius:10px;padding:13px 15px;box-shadow:var(--shadow)}
+.act.red{border-left-color:var(--crit)}.act.amber{border-left-color:var(--warn)}
+.act-dot{width:9px;height:9px;border-radius:50%;flex:none;margin-top:5px}
+.act.red .act-dot{background:var(--crit)}.act.amber .act-dot{background:var(--warn)}
+.act-t{font-size:13.5px;font-weight:600}
+.act-a{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.5}
+/* project cards (apps / websites) */
+.projgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.proj{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 17px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px}
+.proj-h{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.proj-name{font-weight:650;font-size:15.5px;letter-spacing:-.005em}
+.proj-url{font-size:11.5px;font-family:var(--mono);color:var(--accent);text-decoration:none}
+.proj-url:hover{text-decoration:underline}
+.proj-url.dim{color:var(--faint)}
+.proj-purpose{font-size:12.5px;color:var(--muted);line-height:1.5}
+.proj-ints{display:flex;flex-wrap:wrap;gap:5px;padding-top:4px;border-top:1px dashed var(--border)}
+.intb{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:6px;white-space:nowrap;color:var(--c,var(--muted));background:color-mix(in srgb,var(--c,var(--faint)) 14%,transparent);border:1px solid color-mix(in srgb,var(--c,var(--faint)) 30%,transparent)}
+.intb.none{color:var(--faint);background:var(--surface-2);border-color:var(--border)}
+/* databases */
+.dbrow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
+.dbrow:last-child{border-bottom:none}
+.db-app{display:flex;flex-direction:column;gap:1px;min-width:0}
+.db-app b{font-size:13.5px}.db-app span{font-size:11px;font-family:var(--mono);color:var(--faint)}
+/* payments table */
+.ptable{width:100%;border-collapse:collapse;font-size:13px}
+.ptable th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:600;padding:0 10px 10px;border-bottom:1px solid var(--border)}
+.ptable td{padding:11px 10px;border-bottom:1px solid var(--border)}
+.ptable tr:last-child td{border-bottom:none}
+.pt-name{font-weight:600}.pt-name span{font-family:var(--mono);font-size:11px;color:var(--faint);font-weight:400}
+.pt-cost{font-family:var(--mono);font-variant-numeric:tabular-nums}.pt-cost small{color:var(--faint)}
+.pt-date,.pt-next{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:var(--shadow)}
 .k-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}

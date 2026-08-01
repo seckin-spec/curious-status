@@ -1,0 +1,24 @@
+{
+  "_comment": "Per-project metadata + verified issues from the deep audit. type: 'app'=interactive tool, 'website'=brand/marketing site. issues[].sev: red|amber. Edit freely.",
+  "projects": {
+    "pilates-finder":     { "type": "app", "label": "Reformed", "purpose": "Reformer pilates studio finder (Google Places + Claude ranking)", "url": "https://reformed.curiousbrand.co.uk",
+      "issues": [ { "sev": "amber", "title": "Google Places key committed & shipped to every browser", "action": "Restrict the Places/Maps key to *.curiousbrand.co.uk in Google Cloud Console; consider proxying via a function" } ] },
+    "Brief Quiz v2":      { "type": "app", "label": "Brief Quiz", "purpose": "Agency brief diagnostic quiz (tracking pre-wired)", "url": "https://brief.curiousbrand.co.uk",
+      "issues": [ { "sev": "amber", "title": "All tracking IDs are stubs — GA4/Meta/GAds don't fire", "action": "Set real GA4/GTM/pixel IDs or remove the stubs; wire the Google Ads remarketing tag" } ] },
+    "BriefQuiz":          { "type": "app", "label": "Brief Quiz (v1)", "purpose": "Earlier brief diagnostic — leads stay in localStorage", "url": "",
+      "issues": [ { "sev": "amber", "title": "Leads saved to localStorage only — never captured", "action": "Wire the capture to Brevo/Supabase or retire this v1 in favour of Brief Quiz v2" } ] },
+    "FutureReadyTest":    { "type": "app", "label": "Future-Ready Test", "purpose": "Future-ready skills assessment (Stripe-paid)", "url": "",
+      "issues": [ { "sev": "red", "title": "Admin dashboard gated only by client-side password 'admin123' in the URL", "action": "Move admin auth server-side (Supabase Auth/RLS); remove the hardcoded password from the bundle immediately" },
+        { "sev": "amber", "title": "Two Supabase project refs across the codebase", "action": "Consolidate to one project; remove the stale ref" } ] },
+    "BSHNewsletter":      { "type": "app", "label": "BSH Newsletter", "purpose": "Multi-brand e-card / newsletter builder", "url": "",
+      "issues": [ { "sev": "red", "title": "Live Resend API key hardcoded in a committed edge function (pushed to GitHub)", "action": "Rotate the Resend key NOW, move it to `supabase secrets`, strip it from source, and purge it from git history (BFG/filter-repo)" },
+        { "sev": "amber", "title": "Permissive RLS — anon can read/overwrite/delete all saved data", "action": "Require 'authenticated' and scope writes by created_by = auth.uid()" } ] },
+    "curious-prospector": { "type": "app", "label": "Prospector", "purpose": "Internal prospect research & outreach (Claude/OpenAI/Gemini/Hunter/Apollo)", "url": "",
+      "issues": [ { "sev": "amber", "title": ".env holds many live production secrets in a synced Desktop folder", "action": "Ensure it never enters git (it's ignored) and isn't in a shared/cloud-synced path; rotate if ever exposed" } ] },
+    "Cimadam":            { "type": "website", "label": "Çim Adam", "purpose": "Turf brand / marketing site (contact form only)", "url": "",
+      "issues": [ { "sev": "amber", "title": "Contact edge function open + unescaped input in email HTML", "action": "Add JWT/rate-limit + escape user input before templating" } ] },
+    "Curious Status":     { "type": "app", "label": "Curious Status (Bolt)", "purpose": "Your earlier Bolt status-dashboard attempt — overlaps this one", "url": "",
+      "issues": [ { "sev": "amber", "title": "Duplicate of this dashboard", "action": "Decide which to keep; retire the other to avoid confusion" } ] },
+    "prompts.chat":       { "type": "website", "label": "prompts.chat", "purpose": "Third-party open-source clone (not yours)", "url": "" }
+  }
+}
