@@ -68,8 +68,9 @@ const SERVICE_SIGS = [
   { s: "Sentry", cat: "monitoring", env: /SENTRY/, dep: /@sentry/, src: /sentry\.io|@sentry\// },
   { s: "Cloudinary", cat: "storage", env: /CLOUDINARY/, dep: /cloudinary/, src: /res\.cloudinary\.com/ },
   { s: "GA4", cat: "analytics", env: /VITE_GA|GA_MEASUREMENT/, src: /G-[A-Z0-9]{10}|googletagmanager\.com\/gtag/ },
-  { s: "Meta Pixel", cat: "analytics", src: /fbq\(|connect\.facebook\.net/ },
-  { s: "GTM", cat: "analytics", src: /GTM-[A-Z0-9]{5,}/ },
+  { s: "Meta Pixel", cat: "adpixel", src: /fbq\(|connect\.facebook\.net/ },
+  { s: "GTM", cat: "adpixel", src: /GTM-[A-Z0-9]{5,}/ },
+  { s: "Google Ads", cat: "adpixel", src: /googleadservices\.com|AW-[0-9]{9}/ },
   { s: "Plausible", cat: "analytics", src: /plausible\.io/ },
   { s: "PostHog", cat: "analytics", dep: /posthog/, src: /posthog/ },
   { s: "Twilio", cat: "sms", env: /TWILIO/, dep: /twilio/ },
@@ -79,7 +80,7 @@ const SERVICE_SIGS = [
 ];
 function detectIntegrations(appDir, envText, depNames) {
   // one bounded scan of source, then test every signature against it
-  const src = scanFiles(appDir, "(supabase\\.co|supabase\\.auth\\.|signInWith|GoogleProvider|next-auth|GOOGLE_CLIENT_ID|js\\.stripe\\.com|api\\.resend\\.com|maps\\.googleapis\\.com|api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage|api\\.hunter\\.io|googletagmanager|G-[A-Z0-9]{10}|GTM-[A-Z0-9]{5,}|plausible\\.io|posthog|fbq\\(|connect\\.facebook|brevo|sendinblue|createClient\\(|GOOGLE_MAPS_KEY|sk-ant-|sk-proj-|apollo\\.io|company-information\\.service\\.gov\\.uk|companieshouse|sentry\\.io|@sentry|res\\.cloudinary\\.com)",
+  const src = scanFiles(appDir, "(supabase\\.co|supabase\\.auth\\.|signInWith|GoogleProvider|next-auth|GOOGLE_CLIENT_ID|js\\.stripe\\.com|api\\.resend\\.com|maps\\.googleapis\\.com|api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage|api\\.hunter\\.io|googletagmanager|G-[A-Z0-9]{10}|GTM-[A-Z0-9]{5,}|plausible\\.io|posthog|fbq\\(|connect\\.facebook|brevo|sendinblue|createClient\\(|GOOGLE_MAPS_KEY|sk-ant-|sk-proj-|apollo\\.io|company-information\\.service\\.gov\\.uk|companieshouse|sentry\\.io|@sentry|res\\.cloudinary\\.com|googleadservices\\.com|AW-[0-9]{9})",
     { exts: [".js", ".ts", ".tsx", ".jsx", ".html", ".json", ".env", ".example"], cap: 250 }).join(" ");
   const deps = (depNames || []).join(" ");
   const out = [];
@@ -768,43 +769,39 @@ function renderProjectCards(apps, type, title, desc, claude, hunt) {
     return claude.projects.find((p) => t.includes(norm(p.name)))
       || claude.projects.find((p) => t.some((x) => norm(p.name).includes(x) || x.includes(norm(p.name)))) || null;
   };
-  // grouped tool checklist. each item: [label, connected?, optional note]
-  const test = (a, label) => {
-    if (label === "Claude Code") return true;
-    if (label === "Git") return a.hasGit && !a.noRemote;
-    if (label === "Netlify") return a.deploy === "Netlify" || has(a, "Netlify Functions");
-    if (label === "Vercel") return a.deploy === "Vercel";
-    if (label === "GA4") return a.analytics?.kind === "ga4";
-    return has(a, label);
-  };
-  const GROUPS = [
-    { g: "Build & deploy", items: ["Claude Code", "Git", "Netlify", "Vercel"] },
-    { g: "Backend", items: ["Supabase", "Auth"] },
-    { g: "AI", items: ["OpenAI", "Anthropic", "Gemini"] },
-    { g: "Payments", items: ["Stripe"] },
-    { g: "Email", items: ["Resend", "Brevo"] },
-    { g: "Data & enrichment", items: ["Hunter", "Apollo", "Companies House"] },
-    { g: "Maps & analytics", items: ["Google Maps", "GA4", "Meta Pixel"] },
-    { g: "Ops", items: ["Sentry", "Cloudinary"] },
-  ];
+  // Each row is a NEED (category); the value is the product(s) that fill it — or "none".
+  const ints = (a) => a.integrations || [];
+  const byCat = (a, c) => ints(a).filter((i) => i.category === c).map((i) => i.service);
+  const bySvc = (a, names) => ints(a).filter((i) => names.includes(i.service)).map((i) => i.service);
   const cards = list.map((a) => {
     const cm = matchClaude(a);
-    const noteFor = (label, on) => {
-      if (label === "Claude Code") return cm ? `${T(cm.tok)}·$${Math.round(cm.cost).toLocaleString()}` : "";
-      if (label === "Git" && on) return a.repo ? a.repo.split("/").pop() : "";
-      if (label === "Hunter" && on && hunt?.connected) return `${hunt.searches?.used} used`;
-      return "";
-    };
-    const groups = GROUPS.map((grp) => {
-      const chips = grp.items.map((label) => {
-        const on = test(a, label); const n = noteFor(label, on);
-        return `<span class="ci ${on ? "yes" : "no"}"><span class="tick">${on ? "✓" : "✗"}</span>${esc(label)}${n ? `<em>${esc(n)}</em>` : ""}</span>`;
-      }).join("");
-      return `<div class="grp"><div class="grp-l">${esc(grp.g)}</div><div class="grp-items">${chips}</div></div>`;
+    const analytics = a.analytics?.kind === "ga4" ? ["GA4"] : a.analytics?.kind === "placeholder" ? ["GA4 (stub)"] : [];
+    for (const s of bySvc(a, ["Plausible", "PostHog"])) analytics.push(s);
+    const CATS = [
+      { label: "Built with", fill: ["Claude Code"], note: cm ? `${T(cm.tok)} · $${Math.round(cm.cost).toLocaleString()}` : "" },
+      { label: "Version control", fill: a.repo ? ["GitHub"] : (a.hasGit ? ["Git (no remote)"] : []) },
+      { label: "Hosting", fill: (a.deploy && a.deploy !== "git → ?") ? [a.deploy] : (has(a, "Netlify Functions") ? ["Netlify"] : []) },
+      { label: "Database", fill: byCat(a, "database") },
+      { label: "Auth", fill: byCat(a, "auth") },
+      { label: "Payments", fill: byCat(a, "payments") },
+      { label: "Email", fill: byCat(a, "email") },
+      { label: "AI / LLM", fill: byCat(a, "ai") },
+      { label: "Maps / geo", fill: byCat(a, "maps") },
+      { label: "Analytics", fill: analytics },
+      { label: "Ad pixels / tags", fill: byCat(a, "adpixel") },
+      { label: "Enrichment / data", fill: [...byCat(a, "enrichment"), ...byCat(a, "data")] },
+      { label: "Monitoring", fill: byCat(a, "monitoring") },
+      { label: "Media / storage", fill: byCat(a, "storage") },
+    ];
+    const rows = CATS.map((cat) => {
+      const filled = cat.fill.length > 0;
+      const val = filled
+        ? `${cat.fill.map((f) => esc(f)).join(", ")}${cat.note ? ` <em>${esc(cat.note)}</em>` : ""}`
+        : `— none`;
+      return `<div class="cat ${filled ? "on" : "off"}"><div class="cat-l">${esc(cat.label)}</div><div class="cat-v">${val}</div></div>`;
     }).join("");
+    const covered = CATS.filter((c) => c.fill.length).length;
     const total = cm ? `~$${Math.round(cm.cost).toLocaleString()}` : "—";
-    const connected = GROUPS.flatMap((grp) => grp.items).filter((l) => test(a, l)).length;
-    const totalTools = GROUPS.flatMap((grp) => grp.items).length;
     return `
     <div class="proj">
       <div class="proj-h">
@@ -812,8 +809,8 @@ function renderProjectCards(apps, type, title, desc, claude, hunt) {
         <span class="pill ${a.thirdParty ? "idle" : "ok"}">${a.thirdParty ? "external" : a.deploy && a.deploy !== "git → ?" ? a.deploy : "local"}</span>
       </div>
       ${a.purpose ? `<div class="proj-purpose">${esc(a.purpose)}</div>` : ""}
-      <div class="groups">${groups}</div>
-      <div class="proj-total"><span>${connected}/${totalTools} tools · Claude Code build</span><b>${total}</b></div>
+      <div class="cats">${rows}</div>
+      <div class="proj-total"><span>${covered}/${CATS.length} needs covered · Claude Code build</span><b>${total}</b></div>
     </div>`;
   }).join("");
   return `
@@ -1026,16 +1023,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .proj-url:hover{text-decoration:underline}
 .proj-url.dim{color:var(--faint)}
 .proj-purpose{font-size:12.5px;color:var(--muted);line-height:1.5}
-.groups{display:flex;flex-direction:column;gap:7px;padding-top:11px;border-top:1px dashed var(--border)}
-.grp{display:grid;grid-template-columns:82px 1fr;gap:10px;align-items:baseline}
-.grp-l{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:700;padding-top:2px}
-.grp-items{display:flex;flex-wrap:wrap;gap:4px 11px}
-.ci{display:inline-flex;align-items:baseline;gap:4px;font-size:11.5px;white-space:nowrap}
-.ci .tick{font-family:var(--mono);font-weight:700;font-size:10px}
-.ci.yes{color:var(--text)}.ci.yes .tick{color:var(--good)}
-.ci.no{color:var(--faint);text-decoration:line-through;text-decoration-color:var(--border)}
-.ci.no .tick{color:var(--crit);opacity:.5;text-decoration:none;display:inline-block}
-.ci em{font-family:var(--mono);font-size:9px;color:var(--faint);font-style:normal;margin-left:1px;text-decoration:none}
+.cats{display:flex;flex-direction:column;padding-top:11px;border-top:1px dashed var(--border)}
+.cat{display:grid;grid-template-columns:118px 1fr;gap:12px;align-items:baseline;padding:4px 0;border-bottom:1px solid color-mix(in srgb,var(--border) 55%,transparent)}
+.cat:last-child{border-bottom:none}
+.cat-l{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;font-weight:600}
+.cat-v{font-size:12.5px;font-weight:600;color:var(--text)}
+.cat.off .cat-v{color:var(--faint);font-weight:400;font-style:italic}
+.cat-v em{font-family:var(--mono);font-size:10px;color:var(--faint);font-style:normal;font-weight:400;margin-left:4px}
 .proj-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid var(--border);font-size:11px;color:var(--faint)}
 .proj-total b{font-family:var(--mono);font-size:15px;color:var(--text)}
 .proj-ints{display:flex;flex-wrap:wrap;gap:5px;padding-top:4px;border-top:1px dashed var(--border)}
