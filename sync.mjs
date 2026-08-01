@@ -802,6 +802,10 @@ function renderProjectCards(apps, type, title, desc, claude, hunt) {
     }).join("");
     const covered = CATS.filter((c) => c.fill.length).length;
     const total = cm ? `~$${Math.round(cm.cost).toLocaleString()}` : "—";
+    const links = [];
+    if (a.path) links.push(`<a class="plink code" href="claude-cli://open?cwd=${encodeURIComponent(a.path)}&q=${encodeURIComponent("Open the " + a.label + " project.")}" title="Open this project in Claude Code">⚡ Claude Code</a>`);
+    if (a.url) links.push(`<a class="plink" href="${esc(a.url)}" target="_blank" rel="noopener">🔗 Live site</a>`);
+    if (a.repo) links.push(`<a class="plink" href="https://github.com/${esc(a.repo)}" target="_blank" rel="noopener">↗ GitHub</a>`);
     return `
     <div class="proj">
       <div class="proj-h">
@@ -811,6 +815,7 @@ function renderProjectCards(apps, type, title, desc, claude, hunt) {
       ${a.purpose ? `<div class="proj-purpose">${esc(a.purpose)}</div>` : ""}
       <div class="cats">${rows}</div>
       <div class="proj-total"><span>${covered}/${CATS.length} needs covered · Claude Code build</span><b>${total}</b></div>
+      <div class="plinks">${links.join("")}</div>
     </div>`;
   }).join("");
   return `
@@ -1032,6 +1037,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .cat-v em{font-family:var(--mono);font-size:10px;color:var(--faint);font-style:normal;font-weight:400;margin-left:4px}
 .proj-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid var(--border);font-size:11px;color:var(--faint)}
 .proj-total b{font-family:var(--mono);font-size:15px;color:var(--text)}
+.plinks{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.plink{font-size:11.5px;font-weight:600;text-decoration:none;color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);border-radius:7px;padding:5px 10px;white-space:nowrap;transition:background .15s}
+.plink:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.plink.code{color:var(--good);background:color-mix(in srgb,var(--good) 11%,transparent);border-color:color-mix(in srgb,var(--good) 30%,transparent)}
+.plink.code:hover{background:color-mix(in srgb,var(--good) 18%,transparent)}
 .proj-ints{display:flex;flex-wrap:wrap;gap:5px;padding-top:4px;border-top:1px dashed var(--border)}
 .intb{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:6px;white-space:nowrap;color:var(--c,var(--muted));background:color-mix(in srgb,var(--c,var(--faint)) 14%,transparent);border:1px solid color-mix(in srgb,var(--c,var(--faint)) 30%,transparent)}
 .intb.none{color:var(--faint);background:var(--surface-2);border-color:var(--border)}
