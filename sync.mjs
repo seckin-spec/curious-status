@@ -204,6 +204,7 @@ function scanApp(name, appDir) {
     purpose: meta[name]?.purpose || "",
     url: meta[name]?.url || "",
     issues: meta[name]?.issues || [],
+    path: appDir,
   };
 }
 
@@ -529,8 +530,7 @@ function renderClaude(claude, con, max) {
     </div>` : "";
 
   return `
-  <div class="section-label"><h2>Claude / Anthropic</h2><div class="rule"></div>
-    <span class="count">Max subscription + API credits</span></div>
+  ${secHead("Claude / Anthropic", "Your real Anthropic spend vs the usage value your flat Max plan delivers.", "Max subscription + API credits")}
   <div class="spend">${maxPanel}${realPanel}</div>
   ${estPanel}`;
 }
@@ -560,8 +560,7 @@ function renderSEO(seo) {
     </div>`;
   }).join("");
   return `
-  <div class="section-label"><h2>SEO health</h2><div class="rule"></div>
-    <span class="count">live audit · avg ${avg}/11</span></div>
+  ${secHead("SEO health", "On-page SEO per live site — titles, meta, sitemaps, indexability.", `live audit · avg ${avg}/11`)}
   <div class="seogrid">${rows}</div>
   <div class="note info" style="margin-top:12px"><span class="ic">i</span><span><b>SEM (paid ads)</b> — Google Ads / Meta Ads spend &amp; performance need those ad-account connectors, which aren't linked here. Add campaign spend to <code>expenses.json</code> to track cost, or connect the ad platforms later for live metrics.</span></div>`;
 }
@@ -589,8 +588,7 @@ function renderUsage(claude) {
       <div class="ulab">${lab}</div></div>`;
   }).join("");
   return `
-  <div class="section-label"><h2>Token usage over time</h2><div class="rule"></div>
-    <span class="count">list-price value in tooltips</span></div>
+  ${secHead("Token usage over time", "How much you've run through Claude Code — this week and all-time.", "list-price value in tooltips")}
   <div class="spend">
     <div class="panel">
       <div class="spend-head">
@@ -621,8 +619,7 @@ function renderAppUsage(claude) {
       <div class="xval">${T(p.tok)}<span class="dim"> · ${usd0(p.cost)}</span></div>
     </div>`).join("");
   return `
-  <div class="section-label"><h2>Usage by app</h2><div class="rule"></div>
-    <span class="count">from our build sessions</span></div>
+  ${secHead("Usage by app", "Which projects consumed the most Claude Code work.", "from our build sessions")}
   <div class="panel"><div class="xchart">${rows}</div>
     <div class="pc-line dim" style="margin-top:10px">Tokens &amp; list-price value of Claude Code work per project. "General (mixed)" = sessions run from a parent folder spanning several apps.</div>
   </div>`;
@@ -657,13 +654,18 @@ function renderTools(hunt, rs, expenses) {
     <div class="pcard muted"><div class="pc-head"><div class="svc"><div class="glyph" style="background:#10a37f">Ai</div><div><div class="p-name">${esc(others.join(" · "))}</div><div class="p-kind">LLM keys</div></div></div><span class="pill idle">key present</span></div>
       <div class="pc-body"><div class="pc-line dim">No usage API — check each provider's console for spend.</div></div></div>` : "";
   return `
-  <div class="section-label"><h2>Tools &amp; credits</h2><div class="rule"></div><span class="count">live where the API allows</span></div>
+  ${secHead("Tools & credits", "Live credit balances for the external APIs your apps use.", "live where the API allows")}
   <div class="pcards">${hunterCard}${resendCard}${otherCard}</div>`;
 }
 
+// section heading with a one-line description underneath
+function secHead(title, desc, count) {
+  return `<div class="section-label"><h2>${esc(title)}</h2><div class="rule"></div>${count ? `<span class="count">${esc(count)}</span>` : ""}</div>${desc ? `<p class="sec-desc">${esc(desc)}</p>` : ""}`;
+}
+
 // ── health signals → traffic lights + action items ──────────────────
-function computeSignals({ nf, sb, seo, apps, expenses }) {
-  const sig = []; const add = (sev, system, msg, action = "") => sig.push({ sev, system, msg, action });
+function computeSignals({ nf, sb, seo, apps, expenses, dashPath }) {
+  const sig = []; const add = (sev, system, msg, action = "", path = "") => sig.push({ sev, system, msg, action, path });
   add("green", "Dashboard", "HTTPS enforced · encrypted gate");
   if (nf?.connected) { const down = (nf.sites || []).filter((s) => !(s.state === "ready" || s.state === "current")).length;
     add(down ? "amber" : "green", "Netlify", down ? `${down} site not ready` : `${nf.sites?.length || 0} sites live`, down ? "Check failing deploys" : "");
@@ -680,8 +682,8 @@ function computeSignals({ nf, sb, seo, apps, expenses }) {
     add(avg < 7 ? "amber" : "green", "SEO", `avg ${avg}/11 across sites`, avg < 7 ? "Improve titles, meta descriptions, sitemaps" : ""); }
   const chest = apps.find((a) => (a.integrations || []).filter((i) => i.category === "ai").length >= 2);
   if (chest) add("amber", "Secrets", `${chest.label} .env holds many live keys`, "It's gitignored — keep it that way; consider rotating if ever shared");
-  // verified per-app issues from the deep audit (apps-meta.json)
-  for (const a of apps) for (const iss of (a.issues || [])) add(iss.sev, a.label, iss.title, iss.action || "");
+  // verified per-app issues from the deep audit (apps-meta.json) — these carry a project path → fix button
+  for (const a of apps) for (const iss of (a.issues || [])) add(iss.sev, a.label, iss.title, iss.action || "", a.path || "");
   return sig;
 }
 function sevRank(s) { return ({ red: 0, amber: 1, green: 2 })[s] ?? 3; }
@@ -691,7 +693,7 @@ function renderLights(sig) {
   const reds = sig.filter((s) => s.sev === "red").length, ambers = sig.filter((s) => s.sev === "amber").length;
   const head = reds ? `${reds} need attention` : ambers ? `${ambers} to check` : "all systems healthy";
   return `
-  <div class="section-label"><h2>System health</h2><div class="rule"></div><span class="count">${head}</span></div>
+  ${secHead("System health", "Traffic lights across every system. Red = act now, amber = worth a look, green = healthy.", head)}
   <div class="lights">${order.map((s) => `
     <div class="light ${s.sev}">
       <div class="lamp"></div>
@@ -701,16 +703,22 @@ function renderLights(sig) {
 
 function renderActions(sig) {
   const items = sig.filter((s) => s.sev !== "green" && s.action).sort((a, b) => sevRank(a.sev) - sevRank(b.sev));
+  const desc = "Everything flagged amber or red, most urgent first. Hit “Fix in Claude Code” to open that project here with the fix already typed in.";
   if (!items.length) return `
-  <div class="section-label"><h2>To check &amp; act on</h2><div class="rule"></div></div>
+  ${secHead("To check & act on", desc)}
   <div class="panel"><div class="pc-line">Nothing needs action — all green. 🎉</div></div>`;
   return `
-  <div class="section-label"><h2>To check &amp; act on</h2><div class="rule"></div><span class="count">${items.length} item${items.length > 1 ? "s" : ""}</span></div>
-  <div class="acts">${items.map((s) => `
+  ${secHead("To check & act on", desc, `${items.length} item${items.length > 1 ? "s" : ""}`)}
+  <div class="acts">${items.map((s) => {
+    const prompt = `Fix this issue in ${s.system}: ${s.msg}. ${s.action}`.replace(/\s+/g, " ").trim();
+    const href = s.path ? `claude-cli://open?cwd=${encodeURIComponent(s.path)}&q=${encodeURIComponent(prompt)}` : "";
+    return `
     <div class="act ${s.sev}">
       <div class="act-dot"></div>
       <div class="act-body"><div class="act-t">${esc(s.system)} — ${esc(s.msg)}</div><div class="act-a">${esc(s.action)}</div></div>
-    </div>`).join("")}</div>`;
+      ${href ? `<a class="fixbtn" href="${esc(href)}" title="Opens Claude Code in this project with the fix pre-filled">⚡ Fix in Claude Code</a>` : `<span class="fixbtn na" title="No single project to open">manual</span>`}
+    </div>`;
+  }).join("")}</div>`;
 }
 
 function catColor(c) { return ({ database: "#3ecf8e", payments: "#635bff", email: "#5b5bd6", maps: "#ea4335", ai: "#10a37f", analytics: "#e0a93f", enrichment: "#ff5a3c", backend: "#00c7b7", webhook: "#8a9ba8", sms: "#25d366", other: "#8a9ba8" })[c] || "#8a9ba8"; }
@@ -728,7 +736,7 @@ function renderDatabases(apps, sb, nf) {
     </div>`).join("");
   const projects = new Set(dbApps.flatMap((a) => a.supabaseRefs)).size;
   return `
-  <div class="section-label"><h2>Databases &amp; hosting</h2><div class="rule"></div><span class="count">${projects} Supabase · Netlify</span></div>
+  ${secHead("Databases & hosting", "Where your app data lives (Supabase) and what serves your sites (Netlify).", `${projects} Supabase · Netlify`)}
   <div class="spend">
     <div class="panel">
       <div class="k-label" style="margin-bottom:10px">Supabase projects (live ping)</div>
@@ -756,7 +764,7 @@ function renderProjectCards(apps, type, title, count) {
       <div class="proj-ints">${intBadges(a.integrations)}</div>
     </div>`).join("");
   return `
-  <div class="section-label"><h2>${title}</h2><div class="rule"></div><span class="count">${list.length}${count ? " · " + count : ""}</span></div>
+  ${secHead(title, count || "", `${list.length}`)}
   <div class="projgrid">${cards}</div>`;
 }
 
@@ -777,7 +785,7 @@ function renderPayments(expenses, now) {
   const monthly = svcs.reduce((a, s) => a + (numv(s.cost) == null ? 0 : (s.cycle === "yearly" ? s.cost / 12 : s.cost)), 0);
   const anyCost = svcs.some((s) => numv(s.cost) != null);
   return `
-  <div class="section-label"><h2>Payments</h2><div class="rule"></div><span class="count">${anyCost ? money2(Math.round(monthly)) + "/mo total" : "add costs"}</span></div>
+  ${secHead("Payments", "What each tool costs, when you last paid, and when the next charge lands.", anyCost ? money2(Math.round(monthly)) + "/mo total" : "add costs")}
   <div class="panel" style="overflow-x:auto">
     <table class="ptable">
       <thead><tr><th>Tool</th><th>Cost</th><th>Last paid</th><th>Next / resets</th></tr></thead>
@@ -873,7 +881,7 @@ function renderHTML({ scan, nf, sb, rs, hunt, cfg, expenses, claude, seo, now })
 
   ${renderLights(signals)}
 
-  <div class="section-label"><h2>At a glance</h2><div class="rule"></div></div>
+  ${secHead("At a glance", "Your whole operation in four numbers.")}
   <div class="kpis">
     <div class="kpi"><div class="k-label">Live apps</div><div class="k-value">${liveApps}<span class="cur"> / ${appList.length}</span></div>
       <div class="k-meta">interactive tools</div></div>
@@ -949,8 +957,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .act.red{border-left-color:var(--crit)}.act.amber{border-left-color:var(--warn)}
 .act-dot{width:9px;height:9px;border-radius:50%;flex:none;margin-top:5px}
 .act.red .act-dot{background:var(--crit)}.act.amber .act-dot{background:var(--warn)}
+.act-body{flex:1;min-width:0}
 .act-t{font-size:13.5px;font-weight:600}
 .act-a{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.5}
+.sec-desc{margin:-10px 0 18px;font-size:13px;color:var(--muted);line-height:1.55;max-width:72ch}
+.fixbtn{align-self:center;flex:none;font-family:var(--sans);font-size:12px;font-weight:600;text-decoration:none;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);border-radius:8px;padding:7px 12px;white-space:nowrap;cursor:pointer;transition:background .15s}
+.fixbtn:hover{background:color-mix(in srgb,var(--accent) 20%,transparent)}
+.fixbtn.na{color:var(--faint);background:var(--surface-2);border-color:var(--border);cursor:default;font-weight:400}
 /* project cards (apps / websites) */
 .projgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
 .proj{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 17px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px}
